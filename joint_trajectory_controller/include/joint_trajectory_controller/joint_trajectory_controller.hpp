@@ -27,6 +27,7 @@
 #include "control_msgs/srv/query_trajectory_state.hpp"
 #include "control_toolbox/pid.hpp"
 #include "controller_interface/controller_interface.hpp"
+#include "geometry_msgs/msg/wrench_stamped.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "joint_trajectory_controller/interpolation_methods.hpp"
 #include "joint_trajectory_controller/tolerances.hpp"
@@ -244,6 +245,11 @@ protected:
 
   SegmentTolerances default_tolerances_;
 
+  WrenchTolerances wrench_tolerances_;
+  realtime_tools::RealtimeBuffer<std::shared_ptr<geometry_msgs::msg::WrenchStamped>> rt_wrench_stamped_;
+  rclcpp::Subscription<geometry_msgs::msg::WrenchStamped>::SharedPtr wrench_subscriber_ =
+    nullptr;
+
   JOINT_TRAJECTORY_CONTROLLER_PUBLIC
   void preempt_active_goal();
   JOINT_TRAJECTORY_CONTROLLER_PUBLIC
@@ -268,6 +274,8 @@ protected:
     std::shared_ptr<control_msgs::srv::QueryTrajectoryState::Response> response);
 
 private:
+  bool check_wrench_threshold(const rclcpp::Time & time);
+
   bool contains_interface_type(
     const std::vector<std::string> & interface_type_list, const std::string & interface_type);
 

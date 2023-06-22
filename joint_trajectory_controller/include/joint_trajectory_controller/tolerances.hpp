@@ -43,6 +43,20 @@
 namespace joint_trajectory_controller
 {
 /**
+ * \brief Trajectory state tolerances for force/torque.
+ *
+ * A tolerance value of zero means that no tolerance will be applied for that variable.
+ */
+struct WrenchTolerances
+{
+  double forceTotal = 0.0;
+  double forceVec[3] = {0};
+  double torqueTotal = 0.0;
+  double torqueVec[3] = {0};
+  rclcpp::Duration timeout = rclcpp::Duration(0, 0);
+};
+
+/**
  * \brief Trajectory state tolerances for position, velocity and acceleration variables.
  *
  * A tolerance value of zero means that no tolerance will be applied for that variable.

@@ -111,6 +111,90 @@ JointTrajectoryController::state_interface_configuration() const
   return conf;
 }
 
+bool JointTrajectoryController::check_wrench_threshold(const rclcpp::Time & time)
+{
+  // Check if enabled
+  if (params_.wrench_threshold.topic == "")
+  {
+    return true;
+  }
+
+  // Read stamped wrench
+  auto wrench_stamped = *rt_wrench_stamped_.readFromRT();
+  if (!wrench_stamped) {
+    RCLCPP_WARN(get_node()->get_logger(), "WrenchStamped not received.");
+    return false;
+  }
+  
+  // Check all relevant tolerances
+  if (wrench_tolerances_.timeout != rclcpp::Duration(0, 0)) {
+    if (time - wrench_tolerances_.timeout > wrench_stamped->header.stamp) {
+      RCLCPP_WARN(get_node()->get_logger(), "WrenchStamped timeout.");
+      return false;
+    }
+  }
+
+  double forceSumSq = 0.0;
+  if (wrench_tolerances_.forceVec[0] != 0.0) {
+    if (wrench_stamped->wrench.force.x > wrench_tolerances_.forceVec[0]) {
+      RCLCPP_WARN(get_node()->get_logger(), "Wrench: Fx violation.");
+      return false;
+    }
+  }
+  forceSumSq += wrench_stamped->wrench.force.x * wrench_stamped->wrench.force.x;
+  if (wrench_tolerances_.forceVec[1] != 0.0) {
+    if (wrench_stamped->wrench.force.y > wrench_tolerances_.forceVec[1]) {
+      RCLCPP_WARN(get_node()->get_logger(), "Wrench: Fy violation.");
+      return false;
+    }
+  }
+  forceSumSq += wrench_stamped->wrench.force.y * wrench_stamped->wrench.force.y;
+  if (wrench_tolerances_.forceVec[2] != 0.0) {
+    if (wrench_stamped->wrench.force.z > wrench_tolerances_.forceVec[2]) {
+      RCLCPP_WARN(get_node()->get_logger(), "Wrench: Fz violation.");
+      return false;
+    }
+  }
+  forceSumSq += wrench_stamped->wrench.force.z * wrench_stamped->wrench.force.z;
+  if (wrench_tolerances_.forceTotal != 0.0) {
+    if (forceSumSq > wrench_tolerances_.forceTotal*wrench_tolerances_.forceTotal) {
+      RCLCPP_WARN(get_node()->get_logger(), "Wrench: ||F|| violation.");
+      return false;
+    }
+  }
+
+  double torqueSumSq = 0.0;
+  if (wrench_tolerances_.torqueVec[0] != 0.0) {
+    if (wrench_stamped->wrench.torque.x > wrench_tolerances_.torqueVec[0]) {
+      RCLCPP_WARN(get_node()->get_logger(), "Wrench: Tx violation.");
+      return false;
+    }
+  }
+  torqueSumSq += wrench_stamped->wrench.torque.x * wrench_stamped->wrench.torque.x;
+  if (wrench_tolerances_.torqueVec[1] != 0.0) {
+    if (wrench_stamped->wrench.torque.y > wrench_tolerances_.torqueVec[1]) {
+      RCLCPP_WARN(get_node()->get_logger(), "Wrench: Ty violation.");
+      return false;
+    }
+  }
+  torqueSumSq += wrench_stamped->wrench.torque.y * wrench_stamped->wrench.torque.y;
+  if (wrench_tolerances_.torqueVec[2] != 0.0) {
+    if (wrench_stamped->wrench.torque.z > wrench_tolerances_.torqueVec[2]) {
+      RCLCPP_WARN(get_node()->get_logger(), "Wrench: Tz violation.");
+      return false;
+    }
+  }
+  torqueSumSq += wrench_stamped->wrench.torque.z * wrench_stamped->wrench.torque.z;
+  if (wrench_tolerances_.torqueTotal != 0.0) {
+    if (torqueSumSq > wrench_tolerances_.torqueTotal*wrench_tolerances_.torqueTotal) {
+      RCLCPP_WARN(get_node()->get_logger(), "Wrench: ||T|| violation.");
+      return false;
+    }
+  }
+
+  return true;
+}
+
 controller_interface::return_type JointTrajectoryController::update(
   const rclcpp::Time & time, const rclcpp::Duration & period)
 {
@@ -272,8 +356,24 @@ controller_interface::return_type JointTrajectoryController::update(
           // remove the active trajectory pointer so that we stop commanding the hardware
           traj_point_active_ptr_ = nullptr;
 
-          // check goal tolerance
+          
         }
+        // check wrench thresholds
+        else if (!check_wrench_threshold(time))
+        {
+          set_hold_position();
+          auto result = std::make_shared<FollowJTrajAction::Result>();
+
+          RCLCPP_WARN(get_node()->get_logger(), "Aborted due to wrench violation");
+          result->set__error_code(-6);
+          active_goal->setAborted(result);
+          // TODO(matthew-reynolds): Need a lock-free write here
+          // See https://github.com/ros-controls/ros2_controllers/issues/168
+          rt_active_goal_.writeFromNonRT(RealtimeGoalHandlePtr());
+          // remove the active trajectory pointer so that we stop commanding the hardware
+          traj_point_active_ptr_ = nullptr;
+        }
+        // check goal tolerance
         else if (!before_last_point)
         {
           if (!outside_goal_tolerance)
@@ -311,7 +411,7 @@ controller_interface::return_type JointTrajectoryController::update(
         set_hold_position();
         RCLCPP_ERROR(get_node()->get_logger(), "Holding position due to state tolerance violation");
       }
-      
+
       // set values for next hardware write() if tolerance is met
       if (!tolerance_violated_while_moving && within_goal_time)
       {
@@ -907,6 +1007,17 @@ controller_interface::CallbackReturn JointTrajectoryController::on_configure(
     std::string(get_node()->get_name()) + "/query_state",
     std::bind(&JointTrajectoryController::query_state_service, this, _1, _2));
 
+  // Wrench thresholding
+  rt_wrench_stamped_.writeFromNonRT(nullptr);
+  if (params_.wrench_threshold.topic != "")
+  {
+    wrench_subscriber_ = get_node()->create_subscription<geometry_msgs::msg::WrenchStamped>(
+      params_.wrench_threshold.topic, rclcpp::SystemDefaultsQoS(),
+      [this](const geometry_msgs::msg::WrenchStamped::SharedPtr msg) { 
+        rt_wrench_stamped_.writeFromNonRT(msg);
+      });
+  }
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -1179,6 +1290,25 @@ rclcpp_action::GoalResponse JointTrajectoryController::goal_received_callback(
   }
 
   RCLCPP_INFO(get_node()->get_logger(), "Accepted new action goal");
+
+  // Update wrench tolerances if thresholding enabled
+  if (params_.wrench_threshold.topic != "")
+  {
+    if (param_listener_->is_old(params_)) {
+      params_ = param_listener_->get_params();
+
+      wrench_tolerances_.timeout = rclcpp::Duration::from_seconds(params_.wrench_threshold.timeout);
+      wrench_tolerances_.forceTotal = params_.wrench_threshold.fMag;
+      wrench_tolerances_.forceVec[0] = params_.wrench_threshold.fx;
+      wrench_tolerances_.forceVec[1] = params_.wrench_threshold.fy;
+      wrench_tolerances_.forceVec[2] = params_.wrench_threshold.fz;
+      wrench_tolerances_.torqueTotal = params_.wrench_threshold.tMag;
+      wrench_tolerances_.torqueVec[0] = params_.wrench_threshold.tx;
+      wrench_tolerances_.torqueVec[1] = params_.wrench_threshold.ty;
+      wrench_tolerances_.torqueVec[2] = params_.wrench_threshold.tz;
+    }
+  }
+
   return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 }
 
