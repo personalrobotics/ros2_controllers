@@ -463,6 +463,30 @@ controller_interface::return_type JointTrajectoryController::update(
         last_commanded_state_ = state_desired_;
       }
     }
+    else
+    {
+      /// Likely an Empty trajectory from set_hold_position()
+      /// Command hold position
+      // TODO(anyone): How to halt when using effort commands?
+      for (size_t index = 0; index < dof_; ++index)
+      {
+        if (has_position_command_interface_)
+        {
+          joint_command_interface_[0][index].get().set_value(
+            joint_command_interface_[0][index].get().get_value());
+        }
+
+        if (has_velocity_command_interface_)
+        {
+          joint_command_interface_[1][index].get().set_value(0.0);
+        }
+
+        if (has_effort_command_interface_)
+        {
+          joint_command_interface_[3][index].get().set_value(0.0);
+        }
+      }
+    }
   }
 
   publish_state(state_desired_, state_current_, state_error_);
